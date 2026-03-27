@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="zh">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Metaball Particles · WASM</title>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body { background: #000; overflow: hidden; }
+      canvas { display: block; }
+      #loading {
+        position: fixed; inset: 0; z-index: 100;
+        display: flex; align-items: center; justify-content: center;
+        background: #000;
+      }
+      #loading p { font-size: 12px; color: #444; font-family: monospace; letter-spacing: .1em; }
+      #info {
+        position: fixed; bottom: 14px; left: 16px;
+        font-size: 10px; font-family: "Courier New", monospace;
+        color: #333; line-height: 1.9; pointer-events: none;
+      }
+      #info .ok  { color: #4ade80; }
+      #info .hi  { color: #7dd3fc; }
+      #info .dim { color: #2a2a3a; }
+    </style>
+  </head>
+  <body>
+    <div id="loading"><p>LOADING...</p></div>
+
+    <div id="info">
+      <span id="st-wasm" class="dim">wasm: —</span><br />
+      <span id="st-fps"  class="dim">fps: —</span><br />
+      <span class="dim">© Stephane Cuillerdier / Aiekick 2015 · CC BY-NC-SA 3.0</span><br />
+      <span class="dim">hold mouse + drag: x → duration · y → zoom</span>
+    </div>
+
+    <!-- Three.js r128 -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+    <!-- WASM loader: MetaballUtils -->
+    <script src="./metaball_utils.wasm.js"></script>
+
+    <script>
+      const vert = /* glsl */ `
+void main() {
+  gl_Position = vec4(position.xy, 0.0, 1.0);
+}
+`;
+
+      // Fragment shader: per-pixel metaball evaluation using WASM-precomputed particle data.
+      // uParticles[i] = vec4(x, y, mbRadius, distRatio) — updated each frame from WASM.
+      const frag = /* glsl */ `
+precision highp float;
+
+uniform float uTime;
+uniform vec2  uResolution;
+uniform vec4  uMouse;           // xy = position (y flipped), z = mouse down
+uniform vec4  uParticles[100];  // precomputed by WASM each frame
+uniform float uDuration;
+
+const vec3 startColor = vec3(0.0, 0.64, 0.2);
+const vec3 endColor   = vec3(0.06, 0.35, 0.85);
+
+void main() {
+  float z        = 6.0;
+  vec2  s        = uResolution;
+  float duration = uDuration;
+
+  vec2 v = z * (2.0 * gl_FragCoord.xy - s) / s.y;
+
+  // Mouse y => zoom
+  if (uMouse.z > 0.0) v *= uMouse.y / s.y * 20.0;
+
+  // Mouse x => duration (visual only — WASM already baked duration into positions)
+  // We scale v inversely to simulate duration change for display consistency
+  float dScale = (uMouse.z > 0.0) ? (uMouse.x / s.x * 10.0) / max(duration, 0.001) : 1.0;
+  v *= dScale;
+
+  vec3  col = vec3(0.0);
+  float sum = 0.0;
+
+  for (int i = 0; i < 100; i++) {
+    vec4  pd    = uParticles[i];       // x, y, mbRadius, distRatio
+    vec2  delta = v - pd.xy;
+    float mb    = pd.z / dot(delta, delta);
+    sum += mb;
+    col = mix(col, mix(startColor, endColor, pd.w), mb / sum);
+  }
+
+  sum /= 100.0;
+  col  = normalize(col) * sum;
+  sum  = clamp(sum, 0.0, 0.4);
+  col *= smoothstep(vec3(1.0), vec3(0.0), vec3(sum));
+
+  gl_FragColor = vec4(col, 1.0);
+}
+`;
+
+      async function init() {
+        const stWasm = document.getElementById("st-wasm");
+        const stFps  = document.getElementById("st-fps");
+
+        // Load WASM
+        await MetaballUtils.load();
+        stWasm.textContent = "wasm: ✓ metaball_utils · fill_particles";
+        stWasm.className = "ok";
+
+        // Three.js setup
+        const renderer = new THREE.WebGLRenderer({ antialias: false });
+        renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+        renderer.setSize(innerWidth, innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        const scene  = new THREE.Scene();
+        const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+
+        // Pre-allocate particle uniform array (100 × vec4)
+        const particleUniforms = [];
+        for (let i = 0; i < 100; i++) particleUniforms.push(new THREE.Vector4());
+
+        const uniforms = {
+          uTime:       { value: 0.0 },
+          uResolution: { value: new THREE.Vector2(innerWidth, innerHeight) },
+          uMouse:      { value: new THREE.Vector4(0, 0, 0, 0) },
+          uParticles:  { value: particleUniforms },
+          uDuration:   { value: 4.0 },
+        };
+
+        const mesh = new THREE.Mesh(
+          new THREE.PlaneGeometry(2, 2),
+          new THREE.ShaderMaterial({ uniforms, vertexShader: vert, fragmentShader: frag })
+        );
+        scene.add(mesh);
+
+        // Mouse
+        let mouseDown = false;
+        renderer.domElement.addEventListener("mousedown", () => { mouseDown = true; });
+        window.addEventListener("mouseup", () => { mouseDown = false; uniforms.uMouse.value.z = 0; });
+        window.addEventListener("mousemove", e => {
+          uniforms.uMouse.value.set(e.clientX, innerHeight - e.clientY, mouseDown ? 1 : 0, 0);
+          if (mouseDown) {
+            // Update duration from mouse x
+            uniforms.uDuration.value = Math.max(0.1, (e.clientX / innerWidth) * 10.0);
+          }
+        });
+
+        // Touch
+        renderer.domElement.addEventListener("touchstart", e => {
+          mouseDown = true;
+          const t = e.touches[0];
+          uniforms.uMouse.value.set(t.clientX, innerHeight - t.clientY, 1, 0);
+        }, { passive: true });
+        window.addEventListener("touchend", () => { mouseDown = false; uniforms.uMouse.value.z = 0; });
+        window.addEventListener("touchmove", e => {
+          const t = e.touches[0];
+          uniforms.uMouse.value.set(t.clientX, innerHeight - t.clientY, 1, 0);
+          uniforms.uDuration.value = Math.max(0.1, (t.clientX / innerWidth) * 10.0);
+        }, { passive: true });
+
+        window.addEventListener("resize", () => {
+          renderer.setSize(innerWidth, innerHeight);
+          uniforms.uResolution.value.set(innerWidth, innerHeight);
+        });
+
+        document.getElementById("loading").style.display = "none";
+
+        const clock = new THREE.Clock();
+        let frames = 0, lastFpsTime = 0;
+
+        (function loop() {
+          requestAnimationFrame(loop);
+
+          const t = clock.getElapsedTime();
+          uniforms.uTime.value = t;
+
+          // WASM precomputes all 100 particle positions/radii for this frame
+          const duration = uniforms.uDuration.value;
+          const evo      = (Math.sin(t * 0.01 + 400) * 0.5 + 0.5) * 99 + 1;
+          const data     = MetaballUtils.fillParticles(
+            t + 5,      // t (matches original: iTime + 5)
+            duration,   // duration
+            duration,   // dMax
+            100,        // n
+            0.84,       // startRadius
+            1.6,        // endRadius
+            0.51,       // power
+            evo         // evo
+          );
+
+          // Push into uniform array (no GC pressure: reusing existing Vector4 objects)
+          const pu = uniforms.uParticles.value;
+          for (let i = 0; i < 100; i++) {
+            pu[i].set(data[i * 4], data[i * 4 + 1], data[i * 4 + 2], data[i * 4 + 3]);
+          }
+
+          renderer.render(scene, camera);
+
+          frames++;
+          if (t - lastFpsTime >= 1.0) {
+            stFps.textContent = `fps: ${frames}`;
+            stFps.className = frames >= 50 ? "ok" : frames >= 30 ? "hi" : "dim";
+            frames = 0;
+            lastFpsTime = t;
+          }
+        })();
+      }
+
+      init().catch(e => {
+        document.getElementById("loading").innerHTML =
+          `<p style="color:#f87171">ERROR: ${e.message}</p>`;
+        console.error(e);
+      });
+    </script>
+  </body>
+</html>
