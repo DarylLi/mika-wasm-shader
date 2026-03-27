@@ -34,3 +34,5 @@ GLSL 着色器在 GPU 侧运行，读取 WASM 输出的数据进行渲染
 | CPU 侧 | JS Bridge | DataTexture / uniform |
 | GPU 侧 | GLSL Shader | WebGL2 |
 | 输出层 | Canvas | 渲染输出 |
+
+- **Shader 示例地址**: [Shadertoy - MddGWN](https://www.shadertoy.com/view/MddGWN)
